@@ -64,10 +64,10 @@ PSSE_BUSES = 50000
 
 # Saved case to study. The N-0 free case and the N-1 cases are written
 # separately; this file is not overwritten.
-#CASE_FILE = r"D:\ToolAI\N-1-1-AESO\S5_NW_2029_SP_HG_Post.sav"
-CASE_FILE = r"D:\ToolAI\N-1-1-AESO\N0_free.sav"
+#CASE_FILE = r""
+CASE_FILE = r""
 # Contingency file. Used for N-1 and N-1-1. Ignored for a pure N-0 run.
-CON_FILE = r"D:\ToolAI\N-1-1-AESO\test.con"
+CON_FILE = r""
 
 # Contingency sources for N-1 and N-1-1. Turn either one on, or both:
 #   USE_SPECIAL_CON     = read the CONTINGENCY blocks in CON_FILE.
@@ -93,7 +93,7 @@ STUDY = "N-1"
 #                  first outage and only REPORT what is still overloaded.
 #   "PER_OUTAGE" = old behavior: redispatch separately for each first outage.
 N11_MODE = "COMMON"
-COMMON_SAVE_CASE = r"D:\ToolAI\N-1-1-AESO\N1_free_common.sav"
+COMMON_SAVE_CASE = r""
 # The worst contingencies are mitigated together, the result is checked against
 # every contingency, and the step is kept only when the totals improve.
 COMMON_MAX_ROUNDS = 15
@@ -111,7 +111,7 @@ SECOND_LEVEL_EXPLICIT_MAX_PAIRS = 20000
 # can relieve it) and does not change the case. True curtails and saves
 # SAVE_CASE, aiming for no line at or above THERMAL_LIMIT_PCT.
 MAKE_N0_FREE_CASE = True
-SAVE_CASE = r"D:\ToolAI\N-1-1-AESO\out_curtail\N0_free.sav"
+SAVE_CASE = r""
 
 # N-1 only. False is the report. True also saves one mitigated case per
 # contingency that has an overload (under WORK_DIR).
@@ -127,7 +127,7 @@ N1_MODE = "COMMON"
 MAX_N1_CONTINGENCIES = 0
 MAX_N11_FIRST_OUTAGES = 0
 
-WORK_DIR = r"D:\ToolAI\N-1-1-AESO\out_curtail"
+WORK_DIR = r""
 
 # Lines to watch. Empty = the whole case (still filtered by MIN_KV / MAX_KV).
 # A line is inside the study when both ends are in one of these areas.
