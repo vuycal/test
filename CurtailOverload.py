@@ -64,10 +64,10 @@ PSSE_BUSES = 50000
 
 # Saved case to study. The N-0 free case and the N-1 cases are written
 # separately; this file is not overwritten.
-#CASE_FILE = r""
-CASE_FILE = r""
+#CASE_FILE = r"D:\ToolAI\N-1-1-AESO\S5_NW_2029_SP_HG_Post.sav"
+CASE_FILE = r"D:\ToolAI\N-1-1-AESO\N0_free.sav"
 # Contingency file. Used for N-1 and N-1-1. Ignored for a pure N-0 run.
-CON_FILE = r""
+CON_FILE = r"D:\ToolAI\N-1-1-AESO\test.con"
 
 # Contingency sources for N-1 and N-1-1. Turn either one on, or both:
 #   USE_SPECIAL_CON     = read the CONTINGENCY blocks in CON_FILE.
@@ -80,7 +80,7 @@ CON_FILE = r""
 # TL_1097L_356S_611S.
 USE_SPECIAL_CON = True
 USE_SINGLE_LINE_CON = True
-SINGLE_LINE_MIN_KV = 240.0 # Examples: 138.0, 69.0, or 25.0
+SINGLE_LINE_MIN_KV = 69.0 # Examples: 138.0, 69.0, or 25.0
 SINGLE_LINE_MAX_KV = 999.0
 
 # "N-0", "N-1", "N-1-1", or "ALL".
@@ -93,7 +93,7 @@ STUDY = "N-1"
 #                  first outage and only REPORT what is still overloaded.
 #   "PER_OUTAGE" = old behavior: redispatch separately for each first outage.
 N11_MODE = "COMMON"
-COMMON_SAVE_CASE = r""
+COMMON_SAVE_CASE = r"D:\ToolAI\N-1-1-AESO\N1_free_common.sav"
 # The worst contingencies are mitigated together, the result is checked against
 # every contingency, and the step is kept only when the totals improve.
 COMMON_MAX_ROUNDS = 15
@@ -107,11 +107,28 @@ SECOND_LEVEL_SCREEN_MARGIN_PCT = 5.0
 SECOND_LEVEL_METHOD = "AUTO"
 SECOND_LEVEL_EXPLICIT_MAX_PAIRS = 20000
 
+# kV range of the SECOND outages (N-1-1 only). The first outages use
+# SINGLE_LINE_MIN_KV / SINGLE_LINE_MAX_KV. Example: screen first outages at
+# 69 kV and above, but only 240 kV and above as the second outage. Special
+# contingencies (USE_SPECIAL_CON) are always kept in both lists. Leave both
+# equal to the single-line range to use one list for both levels.
+SECOND_LEVEL_MIN_KV = SINGLE_LINE_MIN_KV
+SECOND_LEVEL_MAX_KV = SINGLE_LINE_MAX_KV
+
+# Parallel runs. MAX_WORKERS separate PSS/E processes share the independent
+# power flows (contingency screening and the second level). 1 = no parallel run.
+# Parallel runs start only when the work is large enough to repay the start-up
+# time of each process. If a worker cannot start (for example, no licence for
+# another PSS/E session) the study continues in this process.
+MAX_WORKERS = 8
+PARALLEL_MIN_SCREEN = 200   # contingencies in one screening pass
+PARALLEL_MIN_PAIRS = 400   # first/second outage pairs
+
 # N-0 only. False writes the report (each overload, and the generators that
 # can relieve it) and does not change the case. True curtails and saves
 # SAVE_CASE, aiming for no line at or above THERMAL_LIMIT_PCT.
 MAKE_N0_FREE_CASE = True
-SAVE_CASE = r""
+SAVE_CASE = r"D:\ToolAI\N-1-1-AESO\out_curtail\N0_free.sav"
 
 # N-1 only. False is the report. True also saves one mitigated case per
 # contingency that has an overload (under WORK_DIR).
@@ -127,7 +144,7 @@ N1_MODE = "COMMON"
 MAX_N1_CONTINGENCIES = 0
 MAX_N11_FIRST_OUTAGES = 0
 
-WORK_DIR = r""
+WORK_DIR = r"D:\ToolAI\N-1-1-AESO\out_curtail"
 
 # Lines to watch. Empty = the whole case (still filtered by MIN_KV / MAX_KV).
 # A line is inside the study when both ends are in one of these areas.
@@ -183,7 +200,19 @@ THERMAL_LIMIT_PCT = 100.0
 TARGET_LOADING_PCT = 90.0
 # Lines already this heavy are constrained so the plan does not overload them.
 WATCH_PCT = 100.0
-RATING = "RATE1"          # RATE1, or RATEA if RATE1 is missing
+# Season / rating set.
+#   "SP" = RATE1 (normal, used for the overload test) and RATE3 (emergency).
+#   "WP" = RATE2 (normal, used for the overload test) and RATE4 (emergency).
+SEASON = "SP"
+_SEASON_RATES = {"SP": ("RATE1", "RATE3"), "WP": ("RATE2", "RATE4")}
+RATING, EMERGENCY_RATING = _SEASON_RATES.get(
+    str(SEASON).strip().upper(), ("RATE1", "RATE3")
+)
+# Report column titles follow the season.
+COL_NORMAL = "RatingMVA (%s)" % RATING
+COL_EMERGENCY = "RatingMVA (%s)" % EMERGENCY_RATING
+COL_RATING_LONG = "Rating MVA (%s)" % RATING
+COL_EMERGENCY_LONG = "Emergency Rating (%s) MVA" % EMERGENCY_RATING
 
 # How many of the most effective generators to keep per overloaded line.
 # The joint plan uses the union of those lists.
@@ -291,7 +320,10 @@ SOLVED_MEANINGS = {
 WORK = Path(WORK_DIR)
 WORK.mkdir(parents=True, exist_ok=True)
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+IS_WORKER = bool(os.environ.get("CURTAIL_JOB"))
 LOG_PATH = WORK / ("CurtailOverload_%s.log" % RUN_ID)
+if IS_WORKER:
+    LOG_PATH = Path(os.environ["CURTAIL_JOB"]).with_suffix(".worker.log")
 PROGRESS_PATH = WORK / ("CurtailOverload_%s_progress.txt" % RUN_ID)
 EXCEL_PATH = WORK / ("CurtailOverload_%s_%s.xlsx" % (STUDY.replace("+", ""), RUN_ID))
 ACTIVE_CON_FILE = ""          # merged contingency file written by build_contingency_set()
@@ -589,11 +621,11 @@ def read_branches(min_kv=None, max_kv=None, require_rating=True):
     # is not this value divided by the rating: PCTRATE uses terminal current
     # and the rating converted at nominal kV.
     mva = _abrn_vector("real", "MAXMVA", ties)
-    rate1 = _abrn_vector("real", "RATE1", ties)
-    if rate1 is None:
+    rate1 = _abrn_vector("real", RATING, ties)
+    if rate1 is None and RATING == "RATE1":
         rate1 = _abrn_vector("real", "RATEA", ties)
-    rate3 = _abrn_vector("real", "RATE3", ties)
-    if rate3 is None:
+    rate3 = _abrn_vector("real", EMERGENCY_RATING, ties)
+    if rate3 is None and EMERGENCY_RATING == "RATE3":
         rate3 = _abrn_vector("real", "RATEC", ties)
     rating = _abrn_vector("real", RATING, ties)
     rating_used = RATING
@@ -1334,12 +1366,12 @@ def contingency_name_for_branch(branch, taken_names):
     return candidate
 
 
-def generate_single_line_contingencies(skip_branches, taken_names):
+def generate_single_line_contingencies(skip_branches, taken_names, min_kv=None, max_kv=None):
     """One OPEN LINE contingency per eligible branch, named from its branch name."""
     load_base()
     branches, _rating_name = read_branches(
-        min_kv=SINGLE_LINE_MIN_KV,
-        max_kv=SINGLE_LINE_MAX_KV,
+        min_kv=SINGLE_LINE_MIN_KV if min_kv is None else min_kv,
+        max_kv=SINGLE_LINE_MAX_KV if max_kv is None else max_kv,
         require_rating=False,
     )
     contingencies = []
@@ -1384,6 +1416,40 @@ def build_contingency_set():
         len(contingencies), destination,
     )
     return contingencies, str(destination)
+
+
+def build_second_level_set(first_contingencies):
+    """Second-outage list for N-1-1, with its own kV range.
+
+    The special contingencies are kept as they are. Single-line outages are
+    generated again for SECOND_LEVEL_MIN_KV .. SECOND_LEVEL_MAX_KV. When that
+    range equals the first-level range the first list is reused.
+    """
+    same_range = (
+        float(SECOND_LEVEL_MIN_KV) == float(SINGLE_LINE_MIN_KV)
+        and float(SECOND_LEVEL_MAX_KV) == float(SINGLE_LINE_MAX_KV)
+    )
+    if same_range or not USE_SINGLE_LINE_CON:
+        return list(first_contingencies)
+    special = read_con(CON_FILE) if USE_SPECIAL_CON else []
+    taken = {str(c["name"]).strip().casefold() for c in special}
+    covered = set()
+    for con in special:
+        outage = single_line_outage_of(con)
+        if outage is not None:
+            covered.add(outage)
+    generated = generate_single_line_contingencies(
+        covered, taken, SECOND_LEVEL_MIN_KV, SECOND_LEVEL_MAX_KV
+    )
+    seconds = special + generated
+    destination = WORK / ("second_level_contingencies_%s.con" % RUN_ID)
+    write_con(seconds, destination)
+    log.info(
+        "Second-level outage set: %s special + %s single-line (%.1f-%.1f kV) = %s. File: %s",
+        len(special), len(generated), SECOND_LEVEL_MIN_KV, SECOND_LEVEL_MAX_KV,
+        len(seconds), destination,
+    )
+    return seconds
 
 
 def apply_actions(actions):
@@ -1511,9 +1577,9 @@ def load_base():
     return ok, code
 
 
-def create_study_mon_sub():
-    sub = WORK / "study.sub"
-    mon = WORK / "study.mon"
+def create_study_mon_sub(tag=""):
+    sub = WORK / ("study%s.sub" % tag)
+    mon = WORK / ("study%s.mon" % tag)
     lines = ["COM", "COM study areas", "COM", "SUBSYSTEM 'STUDY_AREA'"]
     if STUDY_AREAS:
         for area in STUDY_AREAS:
@@ -1702,7 +1768,7 @@ def find_contingency(contingencies, name):
 # ---------------------------------------------------------------------------
 
 def n0_line_description(branch):
-    return "%s %s %.2f - %s %s %.2f %s" % (
+    return "%s %s %.2f - %s %s %.2f - %s" % (
         branch.from_bus,
         branch.from_name,
         branch.from_kv,
@@ -1739,11 +1805,11 @@ def n0_thermal_row(branch):
         # PSS/E prints this terminal's own MVA beside P and Q. The branch
         # loading percent below is PSS/E PCTRATE, which uses both terminals.
         "MVA": round((float(branch.p_mw) ** 2 + float(branch.q_mvar) ** 2) ** 0.5, 3),
-        "RatingMVA (RATE3)": (
+        COL_EMERGENCY: (
             round(float(branch.rating_rate3_mva), 3)
             if float(branch.rating_rate3_mva) > core.NEAR_ZERO else ""
         ),
-        "RatingMVA (RATE1)": round(
+        COL_NORMAL: round(
             float(branch.rating_rate1_mva or branch.rating_mva), 3
         ),
         "RatingPct": round(n0_rating_pct_value(branch), 3),
@@ -1892,7 +1958,7 @@ def run_n11_per_outage():
                 "Violated Element": "",
                 "Branch Key": "",
                 "Rating MVA": None,
-                "Emergency Rating (RATE3) MVA": None,
+                COL_EMERGENCY_LONG: None,
                 "First Level Loading (%)": convergence_report_value(outage_issue),
                 "Mitigated Loading (%)": None,
                 "Second Level Loading (%)": None,
@@ -1947,7 +2013,7 @@ def run_n11_per_outage():
             reverse = core.branch_key(branch.to_bus, branch.from_bus, branch.ckt)
             mitigated[reverse] = branch
         ratings, _name = rating_lookup()
-        emergency_ratings = branch_rating_lookup("RATE3")
+        emergency_ratings = branch_rating_lookup(EMERGENCY_RATING)
         # First-level violations are report rows in their own right. Previously
         # this sheet only contained elements returned by the second-level ACCC,
         # which hid first-level violations that did not also appear at level 2.
@@ -1963,7 +2029,7 @@ def run_n11_per_outage():
                     branch.from_bus, branch.to_bus, core.normalize_ckt(branch.ckt)
                 ),
                 "Rating MVA": round(float(branch.rating_mva), 3),
-                "Emergency Rating (RATE3) MVA": (
+                COL_EMERGENCY_LONG: (
                     round(float(emergency_ratings[key]), 3)
                     if key in emergency_ratings else None
                 ),
@@ -1993,7 +2059,7 @@ def run_n11_per_outage():
                     row["FromBus"], row["ToBus"], core.normalize_ckt(row["Ckt"])
                 ),
                 "Rating MVA": row["RatingMVA"],
-                "Emergency Rating (RATE3) MVA": (
+                COL_EMERGENCY_LONG: (
                     round(float(emergency_ratings[key]), 3)
                     if key in emergency_ratings else None
                 ),
@@ -2020,7 +2086,7 @@ def run_n11_per_outage():
                 "Violated Element": "",
                 "Branch Key": "",
                 "Rating MVA": None,
-                "Emergency Rating (RATE3) MVA": None,
+                COL_EMERGENCY_LONG: None,
                 "First Level Loading (%)": None,
                 "Mitigated Loading (%)": status if is_mitigated_base else None,
                 "Second Level Loading (%)": None if is_mitigated_base else status,
@@ -2033,7 +2099,7 @@ def run_n11_per_outage():
                 "Violated Element": "No first-level overload. Mitigation was not applied.",
                 "Branch Key": "",
                 "Rating MVA": None,
-                "Emergency Rating (RATE3) MVA": None,
+                COL_EMERGENCY_LONG: None,
                 "First Level Loading (%)": None,
                 "Mitigated Loading (%)": None,
                 "Second Level Loading (%)": None,
@@ -2065,6 +2131,167 @@ class _QuietLog:
         return False
 
 
+def _pack_keys(keys):
+    return [[int(k[0]), int(k[1]), str(k[2])] for k in sorted(keys)]
+
+
+def _unpack_keys(rows):
+    return {(int(r[0]), int(r[1]), str(r[2])) for r in rows}
+
+
+def _pack_loading(loading):
+    return [[int(k[0]), int(k[1]), str(k[2]), float(v)] for k, v in loading.items()]
+
+
+def _unpack_loading(rows):
+    return {(int(r[0]), int(r[1]), str(r[2])): float(r[3]) for r in rows}
+
+
+def _worker_count(item_count, minimum_items):
+    workers = int(MAX_WORKERS or 1)
+    if IS_WORKER or workers <= 1 or item_count < int(minimum_items) or item_count < 2:
+        return 1
+    return max(1, min(workers, item_count))
+
+
+def _kill_tree(proc):
+    """Stop a worker. A PSS/E process can stay alive after its script is done."""
+    try:
+        proc.kill()
+    except Exception as exc:
+        log.warning("proc.kill failed for worker %s: %s", proc.pid, exc)
+    if sys.platform.startswith("win"):
+        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+        try:
+            subprocess.run(
+                [taskkill, "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+            )
+        except Exception as exc:
+            log.warning("taskkill failed for worker %s: %s", proc.pid, exc)
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    if sys.platform.startswith("win"):
+        command = (
+            "Get-CimInstance Win32_Process -Filter 'ProcessId=%d' | "
+            "Invoke-CimMethod -MethodName Terminate | Out-Null" % proc.pid
+        )
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            )
+            proc.wait(timeout=10)
+            return
+        except Exception:
+            pass
+    log.warning("Worker %s is still running.", proc.pid)
+
+
+_WORKER_BOOTSTRAP = (
+    "import os, sys, traceback\n"
+    "try:\n"
+    "    exec(compile(open({script!r}).read(), {script!r}, 'exec'),"
+    " {{'__name__': '__main__', '__file__': {script!r}}})\n"
+    "except BaseException:\n"
+    "    traceback.print_exc()\n"
+    "sys.stdout.flush()\n"
+    "sys.stderr.flush()\n"
+    "os._exit(1)\n"
+)
+
+
+def run_worker_jobs(jobs, tag, timeout_s=6 * 3600):
+    """Run each job in its own PSS/E process. Returns the result dicts, or None
+    when any worker could not start or did not finish."""
+    script = os.path.abspath(__file__)
+    commands = "PYTHON\nexec(%r)\n" % _WORKER_BOOTSTRAP.format(script=script)
+    started = []
+    failed = False
+    for k, job in enumerate(jobs):
+        stem = str(WORK / ("_job_%s_%s_%s" % (RUN_ID, tag, k)))
+        job_path = Path(stem + ".json")
+        out_path = Path(stem + "_out.json")
+        job["out"] = str(out_path)
+        job["progress"] = stem + "_progress.txt"
+        if out_path.exists():
+            out_path.unlink()
+        with open(job_path, "w", encoding="utf-8") as handle:
+            json.dump(job, handle)
+        try:
+            logfile = open(stem + ".log", "w")
+            kwargs = {}
+            if sys.platform.startswith("win"):
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(
+                [PSSECMD_EXE, "-buses", str(PSSE_BUSES)],
+                stdin=subprocess.PIPE,
+                stdout=logfile,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=dict(os.environ, RUN_INSIDE_PSSECMD="1", CURTAIL_JOB=str(job_path)),
+                **kwargs,
+            )
+            proc.stdin.write(commands)
+            proc.stdin.close()
+        except OSError as exc:
+            log.warning("Could not start worker %s (%s).", k, exc)
+            failed = True
+            break
+        started.append((proc, out_path, logfile, job_path, stem))
+    results = [None] * len(started)
+    pending = set(range(len(started)))
+    deadline = time.time() + timeout_s
+    while pending and not failed and time.time() < deadline:
+        for k in list(pending):
+            proc, out_path = started[k][0], started[k][1]
+            if out_path.exists():
+                try:
+                    with open(out_path, "r", encoding="utf-8") as handle:
+                        results[k] = json.load(handle)
+                except (OSError, ValueError):
+                    failed = True
+                pending.discard(k)
+            elif proc.poll() is not None:
+                if out_path.exists():
+                    continue
+                log.warning("Worker %s ended without a result. See %s.log", k, started[k][4])
+                failed = True
+                pending.discard(k)
+        time.sleep(0.3)
+    if pending:
+        failed = True
+    for proc, _out, logfile, _job, _stem in started:
+        if proc.poll() is None:
+            time.sleep(0.5)
+        if proc.poll() is None:
+            _kill_tree(proc)
+        try:
+            logfile.close()
+        except OSError:
+            pass
+    for result in results:
+        if result is None or "error" in result:
+            if result is not None:
+                log.warning("Worker error: %s", result["error"])
+            failed = True
+    if failed:
+        return None
+    for _proc, out_path, _logfile, job_path, stem in started:
+        for path in (
+            job_path, out_path, Path(stem + ".log"), Path(stem + ".worker.log"),
+            Path(stem + "_progress.txt"),
+        ):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return results
+
+
 def monitored_branch_keys():
     """Canonical keys of every monitored transmission branch, from the loaded case."""
     keys = set()
@@ -2073,11 +2300,12 @@ def monitored_branch_keys():
     return keys
 
 
-def read_loading_map(monitored):
+def read_loading_map(monitored, keep_all=False):
     """PSS/E percent loading of monitored branches in the solved case.
 
-    Only lines at or above (limit - 20) are kept, enough to rank and compare
-    without holding every line for every contingency.
+    By default only lines at or above (limit - 20) are kept, enough to rank
+    and compare without holding every line for every contingency. keep_all
+    returns every monitored line.
     """
     frm = _abrn_vector("int", "FROMNUMBER", 1)
     to = _abrn_vector("int", "TONUMBER", 1)
@@ -2089,7 +2317,7 @@ def read_loading_map(monitored):
             break
     if frm is None or to is None or ckt is None or percent is None:
         return {}
-    floor = float(THERMAL_LIMIT_PCT) - 20.0
+    floor = float("-inf") if keep_all else float(THERMAL_LIMIT_PCT) - 20.0
     loading = {}
     for fbus, tbus, cid, value in zip(frm, to, ckt, percent):
         key = _canonical_branch(fbus, tbus, cid)
@@ -2099,10 +2327,10 @@ def read_loading_map(monitored):
 
 
 def _pct_cell(loading, key):
-    """Loading for a report cell. Lines under (limit - 20) are not stored."""
+    """Loading for a report cell. Empty when the line has no value."""
     if key in loading:
         return round(loading[key], 2)
-    return "<%.0f" % (float(THERMAL_LIMIT_PCT) - 20.0)
+    return None
 
 
 def violations_of(loading):
@@ -2110,31 +2338,67 @@ def violations_of(loading):
     return {key: pct for key, pct in loading.items() if pct + 1.0e-6 >= limit}
 
 
-def screen_contingencies(contingencies, case_path, monitored, label):
-    """Apply BASE CASE and every contingency to case_path and read PSS/E loading."""
+def _screen_items(items, case_path, monitored):
+    """Solve each item ({"name", "actions"}; actions None = base case)."""
     results = {}
-    started = time.time()
     with _QuietLog():
-        for con in [None] + list(contingencies):
-            name = "BASE CASE" if con is None else con["name"]
+        for item in items:
+            name = item["name"]
             ierr = psspy.case(str(case_path))
             if ierr != 0:
                 raise RuntimeError("Could not open %s (ierr %s)." % (case_path, ierr))
-            if con is None:
+            if item["actions"] is None:
                 ok, code = solve_case(FNSL_STUDY, "Base case")
                 issue = "" if ok else solved_meaning(code)
             else:
-                ok, issue = prepare_outage(con["actions"], name)
+                ok, issue = prepare_outage(item["actions"], name)
             results[name] = {
                 "ok": bool(ok),
                 "issue": issue,
                 "pct": read_loading_map(monitored) if ok else {},
             }
+    return results
+
+
+def screen_contingencies(contingencies, case_path, monitored, label):
+    """Apply BASE CASE and every contingency to case_path and read PSS/E loading."""
+    started = time.time()
+    items = [{"name": "BASE CASE", "actions": None}] + [
+        {"name": con["name"], "actions": con["actions"]} for con in contingencies
+    ]
+    results = None
+    workers = _worker_count(len(items), PARALLEL_MIN_SCREEN)
+    if workers > 1:
+        jobs = [
+            {
+                "kind": "screen",
+                "case": str(case_path),
+                "items": items[k::workers],
+                "monitored": _pack_keys(monitored),
+            }
+            for k in range(workers)
+        ]
+        done = run_worker_jobs(jobs, "screen")
+        if done is None:
+            log.warning("%s: parallel run failed. Running in this process.", label)
+        else:
+            merged = {}
+            for part in done:
+                for name, entry in part["results"].items():
+                    merged[name] = {
+                        "ok": entry["ok"],
+                        "issue": entry["issue"],
+                        "pct": _unpack_loading(entry["pct"]),
+                    }
+            results = {item["name"]: merged[item["name"]] for item in items if item["name"] in merged}
+    if results is None:
+        workers = 1
+        results = _screen_items(items, case_path, monitored)
     pairs, excess, failed = screen_totals(results)
     log.info(
-        "%s: %s contingencies screened in %.0f s. %s violating lines, "
-        "%.1f%% total excess, %s not converged.",
-        label, len(results), time.time() - started, pairs, excess, failed,
+        "%s: %s contingencies screened in %.0f s with %s process(es). "
+        "%s violating lines, %.1f%% total excess, %s not converged.",
+        label, len(results), time.time() - started, workers, pairs, excess, failed,
     )
     return results
 
@@ -2285,6 +2549,132 @@ def _n1_style_report_rows(contingencies, initial_case, final_case, initial_scree
     return thermal_rows, free_rows
 
 
+def _same_outage(first, second):
+    if str(first["name"]) == str(second["name"]):
+        return True
+    outage = single_line_outage_of(first)
+    return outage is not None and outage == single_line_outage_of(second)
+
+
+def _seconds_for(first, seconds_all):
+    return [con for con in seconds_all if not _same_outage(first, con)]
+
+
+def second_level_raw(task, seconds_all, final_case, monitored, explicit, initial_case):
+    """Second level for one first outage. Returns plain data (JSON-friendly).
+
+    Runs in this process, or inside a worker PSS/E process. The result holds
+    the loading of every line that appears in the report, with the starting
+    dispatch ("first_before") and with the common dispatch ("first_loading").
+    """
+    state = {}
+    out = _second_level_core(
+        task, seconds_all, final_case, monitored, explicit, initial_case, state
+    )
+    first_loading = state.get("first_loading", {})
+    first_before = state.get("first_before", {})
+    needed = set(violations_of(first_loading))
+    for pair in out["pairs"]:
+        needed.update(_unpack_loading(pair["viol"]))
+    out["first_loading"] = _pack_loading({k: v for k, v in first_loading.items() if k in needed})
+    out["first_before"] = _pack_loading({k: v for k, v in first_before.items() if k in needed})
+    return out
+
+
+def _second_level_core(task, seconds_all, final_case, monitored, explicit, initial_case, state):
+    first = task["first"]
+    index = task["index"]
+    name = first["name"]
+    seconds = _seconds_for(first, seconds_all)
+    out = {
+        "index": index, "first": name, "first_ok": True, "issue": "",
+        "first_loading": [], "pairs": [], "failed": [], "nonconv": [],
+        "notes": [], "flagged": 0,
+    }
+    log.info("Second level %s on first outage %s (%s second outages)", index, name, len(seconds))
+    with _QuietLog():
+        psspy.case(str(final_case))
+        outage_ok, issue = prepare_outage(first["actions"], name)
+    if not outage_ok:
+        out["first_ok"] = False
+        out["issue"] = issue
+        return out
+    state["first_loading"] = read_loading_map(monitored, keep_all=True)
+    first_case = WORK / ("N11_first_%s_%s.sav" % (index, safe_name(name)))
+    if psspy.save(str(first_case)) != 0:
+        out["notes"].append("Could not save the first-outage case for %s." % name)
+        return out
+    # The same first outage with the starting dispatch, for the First Level column.
+    with _QuietLog():
+        psspy.case(str(initial_case))
+        before_ok, _before_issue = prepare_outage(first["actions"], name)
+        if before_ok:
+            state["first_before"] = read_loading_map(monitored, keep_all=True)
+        psspy.case(str(first_case))
+    if not seconds:
+        return out
+    limit = float(THERMAL_LIMIT_PCT)
+    acc_failed = []
+    if explicit:
+        # Small studies: solve every pair. No screening is involved.
+        flagged = [con["name"] for con in seconds]
+    else:
+        sub, mon = create_study_mon_sub("_%s" % index)
+        second_con = WORK / ("second_%s_%s.con" % (index, safe_name(name)))
+        write_con(seconds, second_con)
+        dfx = WORK / ("n11_%s_%s.dfx" % (index, safe_name(name)))
+        acc = WORK / ("n11_%s_%s.acc" % (index, safe_name(name)))
+        if generate_dfax(second_con, dfx, sub, mon) != 0:
+            out["notes"].append("Second-level DFAX failed for %s." % name)
+            return out
+        ierr = run_accc(acc, dfx)
+        if ierr != 0:
+            out["nonconv"].append({
+                "Contingency": "",
+                "Issue": "Second-level ACCC failed (ierr %s)." % ierr,
+            })
+            return out
+        psspy.case(str(first_case))
+        ratings, _name = rating_lookup()
+        flagged_rows, acc_failed = parse_acc_thermal(
+            acc, ratings, first_outage=name,
+            limit_pct=limit - float(SECOND_LEVEL_SCREEN_MARGIN_PCT),
+        )
+        flagged = []
+        for row in flagged_rows:
+            second_name = str(row["Contingency"]).strip()
+            if second_name.upper() != "BASE CASE" and second_name not in flagged:
+                flagged.append(second_name)
+    for failure in acc_failed:
+        second_name = str(failure.get("Contingency", "")).strip()
+        if second_name.upper() == "BASE CASE":
+            continue
+        out["failed"].append([second_name, str(failure.get("Issue", "Not converged"))])
+    # The ACCC percent is only a screen. Solve every flagged pair and use the
+    # PSS/E percent loading.
+    found = 0
+    with _QuietLog():
+        for second_name in flagged:
+            second = find_contingency(seconds, second_name)
+            if second is None:
+                continue
+            psspy.case(str(first_case))
+            second_ok, second_issue = prepare_outage(second["actions"], second_name)
+            if not second_ok:
+                out["failed"].append([second_name, str(second_issue)])
+                continue
+            violating = violations_of(read_loading_map(monitored))
+            if violating:
+                found += len(violating)
+                out["pairs"].append({"second": second_name, "viol": _pack_loading(violating)})
+    out["flagged"] = len(flagged)
+    log.info(
+        "Second level after %s: %s outages solved, %s violating lines confirmed.",
+        name, len(flagged), found,
+    )
+    return out
+
+
 def run_n11_common(study_label="N-1-1", second_level=True):
     contingencies = read_con(ACTIVE_CON_FILE)
     if MAX_N11_FIRST_OUTAGES:
@@ -2307,7 +2697,7 @@ def run_n11_common(study_label="N-1-1", second_level=True):
     branch_info = {}
     for branch in read_branches()[0]:
         branch_info[_canonical_branch(branch.from_bus, branch.to_bus, branch.ckt)] = branch
-    emergency = branch_rating_lookup("RATE3")
+    emergency = branch_rating_lookup(EMERGENCY_RATING)
     log.info("%s monitored transmission branches.", len(monitored))
 
     initial_case = WORK / "_n11_initial.sav"
@@ -2431,19 +2821,18 @@ def run_n11_common(study_label="N-1-1", second_level=True):
         branch = branch_info.get(key)
         if branch is None:
             return {
-                "Violated Element": "%s-%s-%s" % key,
-                "Branch Key": "%s-%s-%s" % key,
-                "Rating MVA": None,
-                "Emergency Rating (RATE3) MVA": emergency.get(key),
+                "BranchName": "",
+                "LineViolation": "%s-%s-%s" % key,
+                COL_RATING_LONG: None,
+                COL_EMERGENCY_LONG: emergency.get(key),
             }
         return {
-            "Violated Element": branch.label,
-            "Branch Key": "%s-%s-%s" % (
-                branch.from_bus, branch.to_bus, core.normalize_ckt(branch.ckt)
-            ),
-            "Rating MVA": round(float(branch.rating_mva), 3),
-            "Emergency Rating (RATE3) MVA": (
-                round(float(emergency[key]), 3) if key in emergency else None
+            "BranchName": branch.name,
+            "LineViolation": n0_line_description(branch),
+            COL_RATING_LONG: round(float(branch.rating_mva), 3),
+            COL_EMERGENCY_LONG: (
+                round(float(emergency[key]), 3)
+                if key in emergency and float(emergency[key]) > core.NEAR_ZERO else None
             ),
         }
 
@@ -2466,7 +2855,7 @@ def run_n11_common(study_label="N-1-1", second_level=True):
             else:
                 fields["Status"] = "Cleared"
             if key in after_v:
-                remaining_text.append("%s on %s (%.1f%%)" % (name, fields["Branch Key"], after_v[key]))
+                remaining_text.append("%s on %s (%.1f%%)" % (name, fields["LineViolation"], after_v[key]))
             screening_rows.append(fields)
     for name, entry in screen.items():
         if not entry["ok"]:
@@ -2487,58 +2876,108 @@ def run_n11_common(study_label="N-1-1", second_level=True):
             "Still violating after the common dispatch: " + "; ".join(remaining_text)
         )
     combined["remaining_rows"] = [
-        {"Contingency": row["First Level Contingency"], "Line": row["Branch Key"],
+        {"Contingency": row["First Level Contingency"], "Line": row["LineViolation"],
          "LoadingPct": row["Loading After Common Dispatch (%)"]}
         for row in screening_rows if row["Status"] != "Cleared"
     ]
 
+    # First-level report in the N-0 layout (thermal violations before the
+    # dispatch and the free-case comparison). N-1 and N-1-1 both use it.
+    thermal_rows, free_rows = _n1_style_report_rows(
+        contingencies, initial_case, final_case, initial_screen, screen, "N-1",
+    )
+    combined["n0_thermal_rows"] = thermal_rows
+    combined["n0_free_rows"] = free_rows
+    combined["n1_report"] = True
     if not second_level:
-        thermal_rows, free_rows = _n1_style_report_rows(
-            contingencies, initial_case, final_case, initial_screen, screen, study_label,
-        )
-        combined["n0_thermal_rows"] = thermal_rows
-        combined["n0_free_rows"] = free_rows
-        combined["n1_report"] = True
         combined["saved_case"] = str(final_case)
         return combined
 
     # ---------------- Part 2: second level on top of each first outage, report only
-    sub, mon = create_study_mon_sub()
-    limit = float(THERMAL_LIMIT_PCT)
-    pair_count = len(contingencies) * max(len(contingencies) - 1, 0)
+    seconds_all = build_second_level_set(contingencies)
+    tasks = [
+        {"index": index, "first": first}
+        for index, first in enumerate(contingencies, start=1)
+    ]
+    pair_count = sum(len(_seconds_for(task["first"], seconds_all)) for task in tasks)
     method = str(SECOND_LEVEL_METHOD).upper()
     explicit_second_level = (
         method == "EXPLICIT"
         or (method == "AUTO" and pair_count <= int(SECOND_LEVEL_EXPLICIT_MAX_PAIRS))
     )
     log.info(
-        "Second level: %s outage pairs, method %s.",
-        pair_count, "EXPLICIT (every pair solved)" if explicit_second_level else "ACCC screen + explicit check",
+        "Second level: %s first outages x %s second outages = %s pairs, method %s.",
+        len(contingencies), len(seconds_all), pair_count,
+        "EXPLICIT (every pair solved)" if explicit_second_level else "ACCC screen + explicit check",
+    )
+    combined["notes"].append(
+        "Second-level outage list: %s outages (single-line range %.1f-%.1f kV)."
+        % (len(seconds_all), SECOND_LEVEL_MIN_KV, SECOND_LEVEL_MAX_KV)
     )
     combined["notes"].append(
         "Second-level method: %s (%s pairs)."
         % ("explicit power flow on every pair" if explicit_second_level else "ACCC screen, flagged pairs re-solved", pair_count)
     )
-    for index, first in enumerate(contingencies, start=1):
-        log.info("Second level %s/%s on first outage %s", index, len(contingencies), first["name"])
-        psspy.case(str(final_case))
-        outage_ok, issue = prepare_outage(first["actions"], first["name"])
-        if not outage_ok:
+    raw_list = None
+    workers = _worker_count(len(tasks), 2) if pair_count >= int(PARALLEL_MIN_PAIRS) else 1
+    if workers > 1:
+        started = time.time()
+        jobs = [
+            {
+                "kind": "second",
+                "case": str(final_case),
+                "tasks": tasks[k::workers],
+                "seconds": seconds_all,
+                "monitored": _pack_keys(monitored),
+                "explicit": explicit_second_level,
+                "initial": str(initial_case),
+            }
+            for k in range(workers)
+        ]
+        done = run_worker_jobs(jobs, "second")
+        if done is None:
+            log.warning("Parallel second level failed. Running in this process.")
+        else:
+            by_index = {}
+            for part in done:
+                for result in part["results"]:
+                    by_index[result["index"]] = result
+            raw_list = [by_index[task["index"]] for task in tasks if task["index"] in by_index]
+            log.info("Second level finished in %.0f s with %s processes.", time.time() - started, workers)
+    if raw_list is None:
+        raw_list = [
+            second_level_raw(
+                task, seconds_all, final_case, monitored, explicit_second_level, initial_case
+            )
+            for task in tasks
+        ]
+
+    def _failed_row(first_name, second_name, issue):
+        return {
+            "First Level Contingency": first_name,
+            "Second Level Contingency": second_name,
+            "BranchName": "", "LineViolation": "",
+            COL_RATING_LONG: None, COL_EMERGENCY_LONG: None,
+            "First Level Loading (%)": None, "Mitigated Loading (%)": None,
+            "Second Level Loading (%)": convergence_report_value(issue),
+            "Mitigation": "Common dispatch",
+        }
+
+    for res in raw_list:
+        first_name = res["first"]
+        combined["notes"].extend(res["notes"])
+        if not res["first_ok"]:
             combined["non_converged"].append({
-                "Contingency": first["name"], "FirstOutage": first["name"],
-                "Issue": "First outage did not solve with the common dispatch: %s" % issue,
+                "Contingency": first_name, "FirstOutage": first_name,
+                "Issue": "First outage did not solve with the common dispatch: %s" % res["issue"],
             })
             continue
-        first_loading = read_loading_map(monitored)
-        first_before = initial_screen.get(first["name"], {"pct": {}})["pct"]
-        first_case = WORK / ("N11_first_%s_%s.sav" % (index, safe_name(first["name"])))
-        if psspy.save(str(first_case)) != 0:
-            combined["notes"].append("Could not save the first-outage case for %s." % first["name"])
-            continue
+        first_before = _unpack_loading(res["first_before"])
+        first_loading = _unpack_loading(res["first_loading"])
 
         def _row(second_name, key, second_pct):
             fields = {
-                "First Level Contingency": first["name"],
+                "First Level Contingency": first_name,
                 "Second Level Contingency": second_name,
             }
             fields.update(_branch_fields(key))
@@ -2552,95 +2991,26 @@ def run_n11_common(study_label="N-1-1", second_level=True):
 
         for key, pct in sorted(violations_of(first_loading).items()):
             combined["thermal_violation"].append(_row("", key, None))
-        seconds = [con for con in contingencies if con["name"] != first["name"]]
-        if not seconds:
-            continue
-        if explicit_second_level:
-            # Small studies: solve every pair. No screening is involved.
-            flagged = [con["name"] for con in seconds]
-            acc_failed = []
-        else:
-            second_con = WORK / ("second_%s_%s.con" % (index, safe_name(first["name"])))
-            write_con(seconds, second_con)
-            dfx = WORK / ("n11_%s_%s.dfx" % (index, safe_name(first["name"])))
-            acc = WORK / ("n11_%s_%s.acc" % (index, safe_name(first["name"])))
-            if generate_dfax(second_con, dfx, sub, mon) != 0:
-                combined["notes"].append("Second-level DFAX failed for %s." % first["name"])
-                continue
-            ierr = run_accc(acc, dfx)
-            if ierr != 0:
-                combined["non_converged"].append({
-                    "Contingency": "", "FirstOutage": first["name"],
-                    "Issue": "Second-level ACCC failed (ierr %s)." % ierr,
-                })
-                continue
-            psspy.case(str(first_case))
-            ratings, _name = rating_lookup()
-            flagged_rows, acc_failed = parse_acc_thermal(
-                acc, ratings, first_outage=first["name"],
-                limit_pct=limit - float(SECOND_LEVEL_SCREEN_MARGIN_PCT),
-            )
-            flagged = []
-            for row in flagged_rows:
-                name = str(row["Contingency"]).strip()
-                if name.upper() != "BASE CASE" and name not in flagged:
-                    flagged.append(name)
-        for failure in acc_failed:
-            second_name = str(failure.get("Contingency", "")).strip()
-            if second_name.upper() == "BASE CASE":
-                continue
+        for item in res["nonconv"]:
             combined["non_converged"].append({
-                "Contingency": second_name, "FirstOutage": first["name"],
-                "Issue": failure.get("Issue", "Not converged"),
+                "Contingency": item["Contingency"], "FirstOutage": first_name,
+                "Issue": item["Issue"],
             })
-            combined["thermal_violation"].append({
-                "First Level Contingency": first["name"],
-                "Second Level Contingency": second_name,
-                "Violated Element": "", "Branch Key": "",
-                "Rating MVA": None, "Emergency Rating (RATE3) MVA": None,
-                "First Level Loading (%)": None, "Mitigated Loading (%)": None,
-                "Second Level Loading (%)": convergence_report_value(failure.get("Issue", "")),
-                "Mitigation": "Common dispatch",
+        for second_name, issue in res["failed"]:
+            combined["non_converged"].append({
+                "Contingency": second_name, "FirstOutage": first_name, "Issue": issue,
             })
-        # The ACCC percent is only a screen. Solve every flagged pair and use
-        # the PSS/E percent loading.
-        found = 0
-        with _QuietLog():
-            for second_name in flagged:
-                second = find_contingency(seconds, second_name)
-                if second is None:
-                    continue
-                psspy.case(str(first_case))
-                second_ok, second_issue = prepare_outage(second["actions"], second_name)
-                if not second_ok:
-                    combined["non_converged"].append({
-                        "Contingency": second_name, "FirstOutage": first["name"],
-                        "Issue": second_issue,
-                    })
-                    combined["thermal_violation"].append({
-                        "First Level Contingency": first["name"],
-                        "Second Level Contingency": second_name,
-                        "Violated Element": "", "Branch Key": "",
-                        "Rating MVA": None, "Emergency Rating (RATE3) MVA": None,
-                        "First Level Loading (%)": None, "Mitigated Loading (%)": None,
-                        "Second Level Loading (%)": convergence_report_value(second_issue),
-                        "Mitigation": "Common dispatch",
-                    })
-                    continue
-                second_loading = read_loading_map(monitored)
-                for key, pct in sorted(violations_of(second_loading).items()):
-                    found += 1
-                    combined["thermal_violation"].append(_row(second_name, key, pct))
-                    combined["second_level"].append({
-                        "FirstOutage": first["name"],
-                        "Contingency": second_name,
-                        "Element": "%s-%s-%s" % key,
-                        "LoadingPct": round(pct, 2),
-                    })
-        log.info(
-            "Second level after %s: %s ACCC-flagged outages, %s violating lines confirmed.",
-            first["name"], len(flagged), found,
-        )
+            combined["thermal_violation"].append(_failed_row(first_name, second_name, issue))
+        for pair in res["pairs"]:
+            for key, pct in sorted(_unpack_loading(pair["viol"]).items()):
+                combined["thermal_violation"].append(_row(pair["second"], key, pct))
+                combined["second_level"].append({
+                    "FirstOutage": first_name,
+                    "Contingency": pair["second"],
+                    "Element": "%s-%s-%s" % key,
+                    "LoadingPct": round(pct, 2),
+                })
+    combined["n11_report"] = True
     combined["saved_case"] = str(final_case)
     return combined
 
@@ -2691,12 +3061,12 @@ _CONTINGENCY_COLUMNS = (
 
 _N0_THERMAL_COLUMNS = [
     "Study", "Contingency", "BranchName", "LineViolation",
-    "RatingMVA (RATE3)", "RatingMVA (RATE1)", "RatingPct", "LoadingPct",
+    COL_EMERGENCY, COL_NORMAL, "RatingPct", "LoadingPct",
 ]
 _N0_FREE_COLUMNS = [
     "Study", "Contingency", "BranchName", "LineViolation",
     "FromBus", "ToBus", "Ckt", "Line", "FlowMW", "QMVAR", "MVA",
-    "RatingMVA (RATE3)", "RatingMVA (RATE1)", "RatingPct", "LoadingPct",
+    COL_EMERGENCY, COL_NORMAL, "RatingPct", "LoadingPct",
     "Post RatingPct", "Post LoadingPct",
 ]
 
@@ -2764,6 +3134,8 @@ def write_workbook(pieces, study_ran):
         ["Allow unmapped dispatch down", "Yes" if ALLOW_UNMAPPED_DISPATCH_DOWN else "No"],
         ["Allow unmapped dispatch up", "Yes" if ALLOW_UNMAPPED_DISPATCH_UP else "No"],
         ["Swing buses", ", ".join(str(b) for b in SWING_BUSES) or "type-3 buses in the case"],
+        ["Season", "%s: overload test on %s, emergency rating %s"
+         % (str(SEASON).upper(), RATING, EMERGENCY_RATING)],
         ["Thermal limit (%)", THERMAL_LIMIT_PCT],
         ["Target loading (%)", min(TARGET_LOADING_PCT, THERMAL_LIMIT_PCT)],
         ["Watch loading (%)", WATCH_PCT],
@@ -2787,14 +3159,15 @@ def write_workbook(pieces, study_ran):
                 break
         summary_rows.append(["Note", note])
     n0_only = [str(value).upper() for value in study_ran] == ["N-0"]
-    common_n11 = (
+    n11_layout = (
         [str(value).upper() for value in study_ran] == ["N-1-1"]
-        and bool(pieces.get("n11"))
+        and bool(pieces.get("n1_report"))
+        and bool(pieces.get("n11_report"))
     )
     n1_layout = (
         [str(value).upper() for value in study_ran] == ["N-1"]
         and bool(pieces.get("n1_report"))
-    )
+    ) or n11_layout
     free_sheet = "N-1 Free Case" if n1_layout else "N-0 Free Case"
     if n0_only or n1_layout:
         sheets = {
@@ -2811,18 +3184,11 @@ def write_workbook(pieces, study_ran):
                 columns=_N0_FREE_COLUMNS,
             ),
         }
-    elif common_n11:
-        n11 = pieces["n11"]
-        sheets = {
-            "Summary": pd.DataFrame(summary_rows, columns=["Item", "Value"]),
-            "Generator Dispatch": _n0_generator_dispatch_frame(
-                pieces.get("applied_rows", [])
-            ),
-            "N-1 Screening": _frame(n11.get("screening", [])),
-            "Round History": _frame(n11.get("history", [])),
-            "Thermal Violation": _frame(pieces.get("thermal_violation", [])),
-            "Non-Converged": _frame(pieces.get("non_converged", [])),
-        }
+        if n11_layout:
+            # Same four sheets as N-1, plus the report-only second level.
+            sheets["N-1-1 Violations"] = _frame(pieces.get("thermal_violation", []))
+            if pieces.get("non_converged"):
+                sheets["Non-Converged"] = _frame(pieces["non_converged"])
     else:
         sheets = {
             "Summary": pd.DataFrame(summary_rows, columns=["Item", "Value"]),
@@ -2841,6 +3207,15 @@ def write_workbook(pieces, study_ran):
         _format_workbook(writer.book)
         if n0_only or n1_layout:
             _format_n0_free_case_sheet(writer.book, free_sheet)
+            if n11_layout:
+                _format_thermal_violation_sheet(
+                    writer.book, "N-1-1 Violations",
+                    headings=[
+                        "First Level Contingency", "Second Level Contingency",
+                        "BranchName", "LineViolation",
+                        COL_RATING_LONG, COL_EMERGENCY_LONG,
+                    ],
+                )
         else:
             _format_thermal_violation_sheet(writer.book)
     log.info("Workbook written to %s.", EXCEL_PATH)
@@ -2872,20 +3247,21 @@ def _format_workbook(workbook):
             sheet.auto_filter.ref = sheet.dimensions
 
 
-def _format_thermal_violation_sheet(workbook):
+def _format_thermal_violation_sheet(workbook, sheet_name="Thermal Violation", headings=None):
     """Add the two-level grouped header shown in the thermal comparison report."""
-    if "Thermal Violation" not in workbook.sheetnames:
+    if sheet_name not in workbook.sheetnames:
         return
-    sheet = workbook["Thermal Violation"]
+    sheet = workbook[sheet_name]
     sheet.insert_rows(1)
-    headings = [
-        "First Level Contingency",
-        "Second Level Contingency",
-        "Violated Element",
-        "Branch Key",
-        "Rating MVA",
-        "Emergency Rating (RATE3) MVA",
-    ]
+    if headings is None:
+        headings = [
+            "First Level Contingency",
+            "Second Level Contingency",
+            "Violated Element",
+            "Branch Key",
+            "Rating MVA",
+            COL_EMERGENCY_LONG,
+        ]
     for column, heading in enumerate(headings, start=1):
         sheet.cell(1, column, heading)
         sheet.merge_cells(start_row=1, start_column=column, end_row=2, end_column=column)
@@ -2958,6 +3334,8 @@ def validate_settings():
         raise RuntimeError("CON_FILE was not found: %s" % CON_FILE)
     if float(SINGLE_LINE_MIN_KV) < 0 or float(SINGLE_LINE_MAX_KV) < float(SINGLE_LINE_MIN_KV):
         raise RuntimeError("SINGLE_LINE_MIN_KV/MAX_KV define an invalid kV range.")
+    if str(SEASON).strip().upper() not in _SEASON_RATES:
+        raise RuntimeError("SEASON must be SP or WP.")
     if Q_MODE.upper() not in ("PF", "HOLD"):
         raise RuntimeError("Q_MODE must be PF or HOLD.")
     if not Path(GENERATOR_CATALOG_FILE).exists():
@@ -3010,6 +3388,10 @@ def main():
         pieces["thermal_violation"].extend(piece.get("thermal_violation", []))
         if piece.get("n11"):
             pieces["n11"] = piece["n11"]
+        if piece.get("n1_report"):
+            pieces["n1_report"] = True
+        if piece.get("n11_report"):
+            pieces["n11_report"] = True
         if piece.get("saved_case"):
             saved.append(piece["saved_case"])
     pieces["saved_case"] = "; ".join(saved)
@@ -3031,7 +3413,52 @@ def main():
     log.info("Done. Workbook: %s", excel)
 
 
-if __name__ == "__main__":
+def worker_main():
+    """Entry point of a worker PSS/E process started by run_worker_jobs()."""
+    import traceback
+    job_path = os.environ["CURTAIL_JOB"]
+    with open(job_path, "r", encoding="utf-8") as handle:
+        job = json.load(handle)
+    out_path = job["out"]
+    try:
+        psspy.psseinit(PSSE_BUSES)
+        psspy.progress_output(2, str(job.get("progress", "")), [1, 0])
+        psspy.report_output(6, "", [])
+        monitored = _unpack_keys(job["monitored"])
+        if job["kind"] == "screen":
+            result = {"results": {}}
+            for name, entry in _screen_items(job["items"], job["case"], monitored).items():
+                result["results"][name] = {
+                    "ok": entry["ok"],
+                    "issue": entry["issue"],
+                    "pct": _pack_loading(entry["pct"]),
+                }
+        elif job["kind"] == "second":
+            result = {
+                "results": [
+                    second_level_raw(
+                        task, job["seconds"], job["case"], monitored, bool(job["explicit"]),
+                        job["initial"],
+                    )
+                    for task in job["tasks"]
+                ]
+            }
+        else:
+            raise RuntimeError("Unknown job kind %s" % job["kind"])
+    except BaseException:
+        result = {"error": traceback.format_exc()}
+    temporary = out_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(result, handle)
+    os.replace(temporary, out_path)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
+if __name__ == "__main__" and IS_WORKER:
+    worker_main()
+elif __name__ == "__main__":
     try:
         main()
     except Exception as exc:
