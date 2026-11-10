@@ -52,6 +52,8 @@ import re
 import json
 import logging
 import shutil
+import hashlib
+import tempfile
 import time
 import subprocess
 from datetime import datetime
@@ -161,6 +163,13 @@ MAX_N1_CONTINGENCIES = 0
 MAX_N11_FIRST_OUTAGES = 0
 
 WORK_DIR = r"D:\ToolAI\N-1-1-AESO\out_curtail"
+# Temporary case, DFAX and shift-factor files. PSS/E cannot write a file whose
+# full path is longer than about 260 characters, which happens easily when
+# WORK_DIR is a long network path. Scratch files therefore go to a short local
+# folder. Empty = the system temp folder. Reports and logs stay in WORK_DIR.
+SCRATCH_DIR = ""
+# True keeps the scratch folder after the run (for debugging).
+KEEP_SCRATCH = False
 
 # Lines to watch. Empty = the whole case (still filtered by MIN_KV / MAX_KV).
 # A line is inside the study when both ends are in one of these areas.
@@ -289,6 +298,14 @@ WORK = Path(WORK_DIR)
 WORK.mkdir(parents=True, exist_ok=True)
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 IS_WORKER = bool(os.environ.get("CURTAIL_JOB"))
+if os.environ.get("CURTAIL_SCRATCH"):
+    SCRATCH = Path(os.environ["CURTAIL_SCRATCH"])
+elif SCRATCH_DIR:
+    SCRATCH = Path(SCRATCH_DIR) / ("curtail_%s" % RUN_ID)
+else:
+    SCRATCH = Path(tempfile.gettempdir()) / ("curtail_%s" % RUN_ID)
+SCRATCH.mkdir(parents=True, exist_ok=True)
+os.environ["CURTAIL_SCRATCH"] = str(SCRATCH)
 LOG_PATH = WORK / ("CurtailOverload_%s.log" % RUN_ID)
 if IS_WORKER:
     LOG_PATH = Path(os.environ["CURTAIL_JOB"]).with_suffix(".worker.log")
@@ -350,8 +367,11 @@ def solve_case(options, label):
 
 
 def safe_name(text):
+    # Short and unique: long contingency names push file paths past the
+    # Windows limit, and two long names can share their first characters.
     cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", str(text).strip())
-    return cleaned[:80] or "case"
+    digest = hashlib.md5(str(text).encode("utf-8", "replace")).hexdigest()[:6]
+    return "%s_%s" % (cleaned[:28] or "case", digest)
 
 
 def q_for_new_p(p_old, q_old, p_new, qmin, qmax):
@@ -906,7 +926,7 @@ def compute_shift_factors(constrained, source_buses, sink_buses, tag):
         for line in constrained
         for bus in (line.branch.from_bus, line.branch.to_bus)
     })
-    folder = WORK / "sf"
+    folder = SCRATCH / "sf"
     folder.mkdir(exist_ok=True)
     sub = folder / ("%s.sub" % tag)
     mon = folder / ("%s.mon" % tag)
@@ -1044,7 +1064,7 @@ def analyze_and_maybe_apply(label, do_apply, study_name, contingency):
             return None, violated, 0.0, 0
         # sensitivity_flows can disturb the working case. Hold the solved
         # case and put it back before the plan is applied.
-        hold = WORK / ("_hold_%s.sav" % safe_name(label))
+        hold = SCRATCH / ("_hold_%s.sav" % safe_name(label))
         held = psspy.save(str(hold)) == 0
         sf, sf_note = compute_shift_factors(
             constrained,
@@ -1123,8 +1143,10 @@ def analyze_and_maybe_apply(label, do_apply, study_name, contingency):
         if plan.curtail_mw < 0.5 and plan.pickup_mw < 0.5:
             result["notes"].append("%s: the effective generators have no room left." % label)
             break
-        snap = WORK / ("_snap_%s.sav" % safe_name(label))
-        if psspy.save(str(snap)) != 0:
+        snap = SCRATCH / ("_snap_%s.sav" % safe_name(label))
+        snap_ierr = psspy.save(str(snap))
+        if snap_ierr != 0:
+            log.warning("PSS/E could not save %s (ierr %s). Path length %s.", snap, snap_ierr, len(str(snap)))
             result["notes"].append("%s: could not save a snapshot before moving generators." % label)
             break
         applied_ok = False
@@ -1546,8 +1568,8 @@ def load_base():
 
 
 def create_study_mon_sub(tag=""):
-    sub = WORK / ("study%s.sub" % tag)
-    mon = WORK / ("study%s.mon" % tag)
+    sub = SCRATCH / ("study%s.sub" % tag)
+    mon = SCRATCH / ("study%s.mon" % tag)
     lines = ["COM", "COM study areas", "COM", "SUBSYSTEM 'STUDY_AREA'"]
     if STUDY_AREAS:
         for area in STUDY_AREAS:
@@ -1840,8 +1862,8 @@ def run_n1_accc():
     )
     load_base()
     sub, mon = create_study_mon_sub()
-    dfx = WORK / ("n1_%s.dfx" % RUN_ID)
-    acc = WORK / ("n1_%s.acc" % RUN_ID)
+    dfx = SCRATCH / ("n1_%s.dfx" % RUN_ID)
+    acc = SCRATCH / ("n1_%s.acc" % RUN_ID)
     ierr = generate_dfax(ACTIVE_CON_FILE, dfx, sub, mon)
     if ierr != 0:
         raise RuntimeError("N-1 DFAX failed (ierr %s)." % ierr)
@@ -1953,10 +1975,10 @@ def run_n11_per_outage():
             saved, piece.get("mitigation", ""),
         )
         seconds = [c for c in contingencies if c["name"] != first["name"]]
-        second_con = WORK / ("second_%s_%s.con" % (index, safe_name(first["name"])))
+        second_con = SCRATCH / ("second_%s_%s.con" % (index, safe_name(first["name"])))
         write_con(seconds, second_con)
-        dfx = WORK / ("n11_%s_%s.dfx" % (index, safe_name(first["name"])))
-        acc = WORK / ("n11_%s_%s.acc" % (index, safe_name(first["name"])))
+        dfx = SCRATCH / ("n11_%s_%s.dfx" % (index, safe_name(first["name"])))
+        acc = SCRATCH / ("n11_%s_%s.acc" % (index, safe_name(first["name"])))
         # DFAX must be built on the saved first-level case, after mitigation
         # when mitigation was required and an acceptable move was available.
         ierr = generate_dfax(second_con, dfx, sub, mon)
@@ -2166,7 +2188,7 @@ def run_worker_jobs(jobs, tag, timeout_s=6 * 3600):
     started = []
     failed = False
     for k, job in enumerate(jobs):
-        stem = str(WORK / ("_job_%s_%s_%s" % (RUN_ID, tag, k)))
+        stem = str(SCRATCH / ("_job_%s_%s_%s" % (RUN_ID, tag, k)))
         job_path = Path(stem + ".json")
         out_path = Path(stem + "_out.json")
         job["out"] = str(out_path)
@@ -2440,6 +2462,9 @@ def build_common_candidate(cons, base_path, work_path, maintain, sink, targets):
             "%s: own mitigation %s, %s machines moved, cleared by itself = %s."
             % (con["name"], piece.get("mitigation", ""), len(deltas), piece.get("cleared"))
         )
+        for problem in piece.get("notes", []):
+            if any(word in problem.lower() for word in ("could not", "did not solve", "no room", "no acceptable")):
+                notes.append("PROBLEM " + problem)
         if not deltas:
             continue
         psspy.case(str(work_path))
@@ -2552,7 +2577,7 @@ def _second_level_core(task, seconds_all, final_case, monitored, explicit, initi
         out["issue"] = issue
         return out
     state["first_loading"] = read_loading_map(monitored, keep_all=True)
-    first_case = WORK / ("N11_first_%s_%s.sav" % (index, safe_name(name)))
+    first_case = SCRATCH / ("N11_first_%s_%s.sav" % (index, safe_name(name)))
     if psspy.save(str(first_case)) != 0:
         out["notes"].append("Could not save the first-outage case for %s." % name)
         return out
@@ -2572,10 +2597,10 @@ def _second_level_core(task, seconds_all, final_case, monitored, explicit, initi
         flagged = [con["name"] for con in seconds]
     else:
         sub, mon = create_study_mon_sub("_%s" % index)
-        second_con = WORK / ("second_%s_%s.con" % (index, safe_name(name)))
+        second_con = SCRATCH / ("second_%s_%s.con" % (index, safe_name(name)))
         write_con(seconds, second_con)
-        dfx = WORK / ("n11_%s_%s.dfx" % (index, safe_name(name)))
-        acc = WORK / ("n11_%s_%s.acc" % (index, safe_name(name)))
+        dfx = SCRATCH / ("n11_%s_%s.dfx" % (index, safe_name(name)))
+        acc = SCRATCH / ("n11_%s_%s.acc" % (index, safe_name(name)))
         if generate_dfax(second_con, dfx, sub, mon) != 0:
             out["notes"].append("Second-level DFAX failed for %s." % name)
             return out
@@ -2688,17 +2713,23 @@ def run_n11_common(study_label="N-1-1", second_level=True):
         log.warning(message)
         combined["notes"].append(message)
 
-    initial_case = WORK / "_n11_initial.sav"
-    current_case = WORK / "_n11_current.sav"
-    candidate_case = WORK / "_n11_candidate.sav"
-    if psspy.save(str(initial_case)) != 0:
-        raise RuntimeError("Could not save the starting case.")
+    log.info("Scratch folder: %s", SCRATCH)
+    initial_case = SCRATCH / "_n11_initial.sav"
+    current_case = SCRATCH / "_n11_current.sav"
+    candidate_case = SCRATCH / "_n11_candidate.sav"
+    save_ierr = psspy.save(str(initial_case))
+    if save_ierr != 0:
+        raise RuntimeError(
+            "PSS/E could not save a case to %s (ierr %s). Set SCRATCH_DIR to a short "
+            "local folder such as C:\\temp\\curtail." % (initial_case, save_ierr)
+        )
     shutil.copyfile(initial_case, current_case)
 
     # ---------------- Part 1: one dispatch that is free of first-level violations
     initial_screen = screen_contingencies(contingencies, initial_case, monitored, "Initial screen")
     screen = initial_screen
     history = []
+    problem_notes = []
     start_pairs, start_excess, start_failed = screen_totals(initial_screen)
     stop_reason = ""
     for round_no in range(1, COMMON_MAX_ROUNDS + 1):
@@ -2724,6 +2755,8 @@ def run_n11_common(study_label="N-1-1", second_level=True):
             )
             for note in notes:
                 log.info("  %s", note)
+                if note.startswith("PROBLEM ") and note not in problem_notes:
+                    problem_notes.append(note)
             row = {
                 "Round": round_no,
                 "Mitigated Contingencies": "; ".join(names),
@@ -2859,6 +2892,12 @@ def run_n11_common(study_label="N-1-1", second_level=True):
         % (start_pairs, end_pairs, start_excess, end_excess, start_failed, end_failed, stop_reason)
     )
     combined["notes"].append("Common N-1 case saved to %s." % final_case)
+    if not combined["applied_rows"]:
+        combined["notes"].append(
+            "WARNING: no generator was moved. See the PROBLEM notes below and the log."
+        )
+    for problem in problem_notes[:25]:
+        combined["notes"].append(problem)
     if remaining_text:
         combined["notes"].append(
             "Still violating after the common dispatch: " + "; ".join(remaining_text)
@@ -3399,6 +3438,8 @@ def main():
     }
     print("PSSE_RESULT:" + json.dumps(payload), flush=True)
     log.info("Done. Workbook: %s", excel)
+    if not KEEP_SCRATCH:
+        shutil.rmtree(str(SCRATCH), ignore_errors=True)
 
 
 def worker_main():
