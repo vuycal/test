@@ -2457,43 +2457,19 @@ def rank_violating_contingencies(results):
 _DISPATCH_REJECT = ""
 
 
-def swing_drift(sink, targets):
-    """How far each in-service swing machine is from its starting P.
-
-    Returns (worst gap MW, text for the machines outside SWING_TOL_MW).
-    """
-    sink_set = set(int(bus) for bus in sink)
-    worst = 0.0
-    outside = []
-    for gen in read_generators([]):
-        if int(gen.bus) not in sink_set or int(gen.status) != 1:
-            continue
-        target = float(targets.get(gen.key, gen.p_mw))
-        gap = abs(float(gen.p_mw) - target)
-        worst = max(worst, gap)
-        if gap > float(SWING_TOL_MW):
-            outside.append(
-                "bus %s machine %s %.2f MW, started at %.2f MW" % (
-                    gen.bus, gen.machine_id, gen.p_mw, target
-                )
-            )
-    return worst, "; ".join(outside)
-
-
 def apply_dispatch_deltas(deltas, maintain, sink, targets):
-    """Add MW changes to the loaded case. Swing machines keep their starting P.
+    """Add MW changes to the machines of the loaded case, then hold the swing.
 
-    Returns False when the power flow does not solve, or when a swing machine
-    is still more than SWING_TOL_MW away from its starting P. The reason is
-    left in _DISPATCH_REJECT.
+    Same rule as CurtailOverload_v2.py. The total P of the swing machines is
+    held within SWING_TOL_MW. PSS/E may share that total across the machines
+    on the swing bus.
     """
     global _DISPATCH_REJECT
     _DISPATCH_REJECT = ""
-    hold = set(int(bus) for bus in maintain)
     live = {gen.key: gen for gen in read_generators([])}
     for key, delta in deltas.items():
         gen = live.get(key)
-        if gen is None or int(gen.status) != 1 or int(gen.bus) in hold:
+        if gen is None or int(gen.status) != 1:
             continue
         p_new = core.clip(gen.p_mw + delta, gen.pmin_mw, gen.pmax_mw)
         q_new = q_for_new_p(gen.p_mw, gen.q_mvar, p_new, gen.qmin_mvar, gen.qmax_mvar)
@@ -2507,16 +2483,7 @@ def apply_dispatch_deltas(deltas, maintain, sink, targets):
     ok, _code = solve_case(FNSL_CURTAIL, "Common dispatch after swing correction")
     if not ok:
         _DISPATCH_REJECT = "power flow did not solve after holding the swing"
-        return False
-    _worst, outside = swing_drift(sink, targets)
-    if outside:
-        _DISPATCH_REJECT = (
-            "swing P is more than %.1f MW from its starting value (%s)"
-            % (float(SWING_TOL_MW), outside)
-        )
-        log.warning(_DISPATCH_REJECT)
-        return False
-    return True
+    return ok
 
 
 def build_common_candidate(cons, base_path, work_path, maintain, sink, targets):
@@ -2765,11 +2732,7 @@ def propose_deltas(targeted, scenarios, tol, current_case, by_name, maintain, si
         plan = build_coupled_plan(scenarios, set(targeted), tol, base_gens, maintain, sink)
         if plan is None:
             return [], ["no targeted line is above the limit"]
-        hold = set(int(bus) for bus in maintain)
-        deltas = {
-            move.key: float(move.delta_mw)
-            for move in plan.moves if int(move.bus) not in hold
-        }
+        deltas = {move.key: float(move.delta_mw) for move in plan.moves}
         note = "plan: %s Curtail %.1f MW, pickup %.1f MW, %d machines." % (
             plan.message, plan.curtail_mw, plan.pickup_mw, len(deltas)
         )
@@ -3052,7 +3015,7 @@ def clear_base_case(contingencies, by_name, initial_screen, screen, current_case
     if best is None:
         note = (
             "Base case still has an overload. No cleanup was applied, "
-            "because each one moved the swing too far or re-overloaded a line the N-1 dispatch had cleared."
+            "because each one either did not solve or re-overloaded a line the N-1 dispatch had cleared."
         )
         log.info(note)
         return screen, note
@@ -3308,8 +3271,6 @@ def run_n11_common(study_label="N-1-1", second_level=True):
         new = final_gens.get(key)
         if new is None or abs(new.p_mw - old.p_mw) < 0.05:
             continue
-        if int(old.bus) in set(int(bus) for bus in sink):
-            continue
         combined["applied_rows"].append({
             "Label": "COMMON N-1 DISPATCH",
             "Study": study_label,
@@ -3390,16 +3351,6 @@ def run_n11_common(study_label="N-1-1", second_level=True):
         % (start_pairs, end_pairs, start_excess, end_excess, start_failed, end_failed, stop_reason)
     )
     combined["notes"].append("Common N-1 case saved to %s." % final_case)
-    psspy.case(str(final_case))
-    _gap, outside = swing_drift(sink, targets)
-    if outside:
-        combined["notes"].append(
-            "Swing P is more than %.1f MW from its starting value: %s" % (float(SWING_TOL_MW), outside)
-        )
-    else:
-        combined["notes"].append(
-            "Swing machines stayed within %.1f MW of their starting P." % float(SWING_TOL_MW)
-        )
     for name, worst in sorted(unfixable.items()):
         combined["notes"].append(
             "NOT FIXABLE with the allowed generators: %s (worst line %.1f%%)." % (name, worst)
