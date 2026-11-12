@@ -129,7 +129,7 @@ DC_SCREEN_MARGIN_PCT = 15.0
 # "AUTO"     = solve every (first, second) pair when there are at most
 #              SECOND_LEVEL_EXPLICIT_MAX_PAIRS of them, otherwise use ACCC.
 # "EXPLICIT" = always solve every pair. "ACCC" = always screen with ACCC.
-SECOND_LEVEL_METHOD = "ACCC"
+SECOND_LEVEL_METHOD = "EXPLICIT"
 SECOND_LEVEL_EXPLICIT_MAX_PAIRS = 30
 
 # kV range of the SECOND outages (N-1-1 only). The first outages use
@@ -3500,6 +3500,23 @@ def run_n11_common(study_label="N-1-1", second_level=True):
         "Second-level method: %s (%s pairs)."
         % (method_text, pair_count)
     )
+    # Overloads that remain on the N-1 free case, with no contingency applied.
+    base_after = screen.get("BASE CASE", {"ok": False, "pct": {}})
+    base_before = initial_screen.get("BASE CASE", {"ok": False, "pct": {}})
+    if base_after.get("ok"):
+        for key, pct in sorted(violations_of(base_after["pct"]).items()):
+            fields = {
+                "First Level Contingency": "",
+                "Second Level Contingency": "Base case",
+            }
+            fields.update(_branch_fields(key))
+            fields["First Level Loading (%)"] = (
+                _pct_cell(base_before["pct"], key) if base_before.get("ok") else None
+            )
+            fields["Mitigated Loading (%)"] = round(pct, 2)
+            fields["Second Level Loading (%)"] = round(pct, 2)
+            fields["Mitigation"] = "Common dispatch"
+            combined["thermal_violation"].append(fields)
     raw_list = None
     workers = _worker_count(len(tasks), 2) if pair_count >= int(PARALLEL_MIN_PAIRS) else 1
     if workers > 1:
